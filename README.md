@@ -91,6 +91,8 @@ The best language servers go far beyond the standard protocol, and this is where
 | `ts_organize_imports` | Sort and prune imports, written to disk |
 | `ts_rename_file` | Fix every import after a file moves — move the file, then call this |
 
+typescript-language-server needs a `typescript` install it can find (usually the workspace's own). TypeScript 7 ships no `tsserver.js`, so keep `typescript@5` in the workspace for now.
+
 **Rust (`rust-analyzer`)**
 
 | Tool | What it does |

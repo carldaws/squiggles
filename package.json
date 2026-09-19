@@ -1,6 +1,6 @@
 {
   "name": "squiggles",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "MCP server that lets your coding agent see the squiggles — LSP diagnostics, navigation, refactoring, and server-specific extras",
   "type": "module",
   "main": "dist/index.js",
