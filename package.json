@@ -1,16 +1,27 @@
 {
-  "name": "mclsp",
-  "version": "0.2.0",
-  "description": "MCP server bridging coding agents to LSP capabilities",
+  "name": "squiggles",
+  "version": "0.3.0",
+  "description": "MCP server that lets your coding agent see the squiggles — LSP diagnostics, navigation, refactoring, and server-specific extras",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "mclsp": "dist/index.js"
+    "squiggles": "dist/index.js"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/carldaws/mclsp.git"
+    "url": "git+https://github.com/carldaws/squiggles.git"
+  },
+  "keywords": [
+    "mcp",
+    "lsp",
+    "language-server",
+    "diagnostics",
+    "coding-agent",
+    "claude-code"
+  ],
+  "engines": {
+    "node": ">=20"
   },
   "files": [
     "dist"
@@ -19,7 +30,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
