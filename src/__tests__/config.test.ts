@@ -21,7 +21,7 @@ servers:
     filePatterns: ["**/*.ts", "**/*.tsx"]
 `;
 
-function writeConfig(content: string, filename = "mclsp.yaml") {
+function writeConfig(content: string, filename = "squiggles.yaml") {
   fs.writeFileSync(path.join(TEST_ROOT, filename), content);
 }
 
@@ -31,42 +31,67 @@ describe("loadConfig", () => {
     expect(config).toBeNull();
   });
 
-  it("loads mclsp.yaml", () => {
-    writeConfig(VALID_CONFIG, "mclsp.yaml");
+  it("loads squiggles.yaml", () => {
+    writeConfig(VALID_CONFIG, "squiggles.yaml");
     const config = loadConfig(TEST_ROOT);
     expect(config).not.toBeNull();
     expect(config!.servers.typescript.command).toEqual(["typescript-language-server", "--stdio"]);
   });
 
-  it("loads mclsp.yml", () => {
-    writeConfig(VALID_CONFIG, "mclsp.yml");
+  it("loads squiggles.yml", () => {
+    writeConfig(VALID_CONFIG, "squiggles.yml");
     const config = loadConfig(TEST_ROOT);
     expect(config).not.toBeNull();
     expect(config!.servers.typescript).toBeDefined();
   });
 
-  it("loads .mclsp.yaml", () => {
-    writeConfig(VALID_CONFIG, ".mclsp.yaml");
+  it("loads .squiggles.yaml", () => {
+    writeConfig(VALID_CONFIG, ".squiggles.yaml");
     const config = loadConfig(TEST_ROOT);
     expect(config).not.toBeNull();
     expect(config!.servers.typescript).toBeDefined();
   });
 
-  it("loads .mclsp.yml", () => {
-    writeConfig(VALID_CONFIG, ".mclsp.yml");
+  it("loads .squiggles.yml", () => {
+    writeConfig(VALID_CONFIG, ".squiggles.yml");
     const config = loadConfig(TEST_ROOT);
     expect(config).not.toBeNull();
     expect(config!.servers.typescript).toBeDefined();
   });
 
-  it("prefers mclsp.yaml over dotfile variants", () => {
-    writeConfig(VALID_CONFIG, "mclsp.yaml");
+  it("loads legacy mclsp config names", () => {
+    for (const name of ["mclsp.yaml", "mclsp.yml", ".mclsp.yaml", ".mclsp.yml"]) {
+      fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+      fs.mkdirSync(TEST_ROOT, { recursive: true });
+      writeConfig(VALID_CONFIG, name);
+      const config = loadConfig(TEST_ROOT);
+      expect(config, name).not.toBeNull();
+      expect(config!.servers.typescript, name).toBeDefined();
+    }
+  });
+
+  it("prefers squiggles.yaml over dotfile variants", () => {
+    writeConfig(VALID_CONFIG, "squiggles.yaml");
     writeConfig(`
 servers:
   rust:
     command: ["rust-analyzer"]
     filePatterns: ["**/*.rs"]
-`, ".mclsp.yaml");
+`, ".squiggles.yaml");
+    const config = loadConfig(TEST_ROOT);
+    expect(config).not.toBeNull();
+    expect(config!.servers.typescript).toBeDefined();
+    expect(config!.servers.rust).toBeUndefined();
+  });
+
+  it("prefers squiggles.yaml over legacy mclsp.yaml", () => {
+    writeConfig(VALID_CONFIG, "squiggles.yaml");
+    writeConfig(`
+servers:
+  rust:
+    command: ["rust-analyzer"]
+    filePatterns: ["**/*.rs"]
+`, "mclsp.yaml");
     const config = loadConfig(TEST_ROOT);
     expect(config).not.toBeNull();
     expect(config!.servers.typescript).toBeDefined();
@@ -116,9 +141,9 @@ servers:
     expect(Object.keys(config!.servers)).toEqual(["typescript", "rust"]);
   });
 
-  it("does not load .mclsp.json files", () => {
+  it("does not load .squiggles.json files", () => {
     fs.writeFileSync(
-      path.join(TEST_ROOT, ".mclsp.json"),
+      path.join(TEST_ROOT, ".squiggles.json"),
       JSON.stringify({
         servers: {
           ts: { command: ["tls"], filePatterns: ["**/*.ts"] },

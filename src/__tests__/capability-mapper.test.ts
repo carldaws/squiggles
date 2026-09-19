@@ -24,6 +24,7 @@ describe("buildToolDefinitions", () => {
     expect(names).toContain("type_hierarchy");
     expect(names).toContain("open_file");
     expect(names).toContain("diagnostics");
+    expect(names).toContain("format");
   });
 
   it("all tools have required schema fields", () => {
@@ -50,12 +51,15 @@ describe("buildToolDefinitions", () => {
     }
   });
 
-  it("rename tool requires newName", () => {
+  it("rename tool requires newName but not apply", () => {
     const tools = buildToolDefinitions();
     const rename = tools.find((t) => t.name === "rename");
     expect(rename).toBeDefined();
     const required = rename!.inputSchema.required as string[];
     expect(required).toContain("newName");
+    expect(required).not.toContain("apply");
+    const properties = rename!.inputSchema.properties as Record<string, unknown>;
+    expect(properties.apply).toBeDefined();
   });
 
   it("diagnostics tool does not require file", () => {
@@ -68,14 +72,11 @@ describe("buildToolDefinitions", () => {
 });
 
 describe("buildExtensionToolDefinitions", () => {
-  it("builds tool definitions for textDocument extensions", () => {
+  const request = () => ({ method: "test/method", params: null });
+
+  it("builds tool definitions for file extensions", () => {
     const extensions: ServerExtension[] = [
-      {
-        name: "test_tool",
-        method: "test/method",
-        description: "A test tool",
-        params: "textDocument",
-      },
+      { name: "test_tool", description: "A test tool", input: "file", request },
     ];
     const tools = buildExtensionToolDefinitions(extensions);
     expect(tools).toHaveLength(1);
@@ -84,14 +85,9 @@ describe("buildExtensionToolDefinitions", () => {
     expect(required).toContain("file");
   });
 
-  it("builds tool definitions for textDocumentPosition extensions", () => {
+  it("builds tool definitions for position extensions", () => {
     const extensions: ServerExtension[] = [
-      {
-        name: "test_pos_tool",
-        method: "test/posMethod",
-        description: "A position tool",
-        params: "textDocumentPosition",
-      },
+      { name: "test_pos_tool", description: "A position tool", input: "position", request },
     ];
     const tools = buildExtensionToolDefinitions(extensions);
     expect(tools).toHaveLength(1);
@@ -101,18 +97,32 @@ describe("buildExtensionToolDefinitions", () => {
     expect(required).toContain("col");
   });
 
-  it("builds tool definitions for custom extensions", () => {
+  it("builds tool definitions for none extensions", () => {
     const extensions: ServerExtension[] = [
-      {
-        name: "custom_tool",
-        method: "custom/method",
-        description: "A custom tool",
-        params: "custom",
-      },
+      { name: "no_input_tool", description: "No input", input: "none", request },
     ];
     const tools = buildExtensionToolDefinitions(extensions);
-    expect(tools).toHaveLength(1);
-    expect(tools[0].inputSchema.additionalProperties).toBe(true);
+    expect(tools[0].inputSchema.required).toEqual([]);
+  });
+
+  it("uses the extension's own schema for custom extensions", () => {
+    const schema = {
+      type: "object",
+      properties: { thing: { type: "string" } },
+      required: ["thing"],
+    };
+    const extensions: ServerExtension[] = [
+      { name: "custom_tool", description: "A custom tool", input: "custom", inputSchema: schema, request },
+    ];
+    const tools = buildExtensionToolDefinitions(extensions);
+    expect(tools[0].inputSchema).toBe(schema);
+  });
+
+  it("throws for custom extensions without a schema", () => {
+    const extensions: ServerExtension[] = [
+      { name: "bad_tool", description: "Missing schema", input: "custom", request },
+    ];
+    expect(() => buildExtensionToolDefinitions(extensions)).toThrow("inputSchema");
   });
 
   it("returns empty array for empty input", () => {

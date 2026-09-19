@@ -3,7 +3,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import * as path from "node:path";
 import { LspClient } from "./lsp-client.js";
 import { log, logError } from "./utils.js";
-import type { MclspConfig } from "./types.js";
+import type { SquigglesConfig } from "./types.js";
 import { getExtensionsForCommand, type ServerExtension } from "./extensions/index.js";
 
 interface ManagedLsp {
@@ -16,7 +16,7 @@ export class LspManager {
   private lsps: ManagedLsp[] = [];
   private rootPath: string;
 
-  constructor(config: MclspConfig, rootPath: string) {
+  constructor(config: SquigglesConfig, rootPath: string) {
     this.rootPath = rootPath;
 
     for (const [name, serverConfig] of Object.entries(config.servers)) {
@@ -27,16 +27,14 @@ export class LspManager {
   }
 
   async ensureClientForFile(relativePath: string): Promise<LspClient | null> {
-    // Return already-running client if available
     const running = this.getClientForFile(relativePath);
     if (running) return running;
 
-    // Find matching but not-yet-started server
-    const lsp = this.lsps.find((l) => !l.client.running && l.matcher(relativePath));
+    const lsp = this.lsps.find((l) => l.matcher(relativePath));
     if (!lsp) return null;
 
     try {
-      await lsp.client.start();
+      await lsp.client.ensureStarted();
       return lsp.client;
     } catch (err) {
       logError(`Failed to start LSP "${lsp.client.name}"`, err);
@@ -53,46 +51,35 @@ export class LspManager {
     return null;
   }
 
-  getClientsForFile(relativePath: string): LspClient[] {
-    return this.lsps
-      .filter((lsp) => lsp.client.running && lsp.matcher(relativePath))
-      .map((lsp) => lsp.client);
-  }
-
   getAllClients(): LspClient[] {
     return this.lsps.filter((lsp) => lsp.client.running).map((lsp) => lsp.client);
   }
 
-  getAllExtensions(): { extension: ServerExtension; client: LspClient }[] {
-    const results: { extension: ServerExtension; client: LspClient }[] = [];
-    for (const lsp of this.lsps) {
-      if (!lsp.client.running) continue;
-      const extensions = getExtensionsForCommand(lsp.command);
-      for (const extension of extensions) {
-        results.push({ extension, client: lsp.client });
-      }
-    }
-    return results;
-  }
-
   getAllConfiguredExtensions(): ServerExtension[] {
-    const extensions: ServerExtension[] = [];
+    const byName = new Map<string, ServerExtension>();
     for (const lsp of this.lsps) {
-      extensions.push(...getExtensionsForCommand(lsp.command));
-    }
-    return extensions;
-  }
-
-  getClientForExtensionTool(toolName: string): { client: LspClient; extension: ServerExtension } | null {
-    for (const lsp of this.lsps) {
-      if (!lsp.client.running) continue;
-      const extensions = getExtensionsForCommand(lsp.command);
-      const extension = extensions.find((e) => e.name === toolName);
-      if (extension) {
-        return { client: lsp.client, extension };
+      for (const extension of getExtensionsForCommand(lsp.command)) {
+        if (!byName.has(extension.name)) byName.set(extension.name, extension);
       }
     }
-    return null;
+    return [...byName.values()];
+  }
+
+  async ensureClientForExtensionTool(
+    toolName: string
+  ): Promise<{ client: LspClient; extension: ServerExtension } | null> {
+    const candidates = this.lsps
+      .map((lsp) => ({
+        lsp,
+        extension: getExtensionsForCommand(lsp.command).find((e) => e.name === toolName),
+      }))
+      .filter((c): c is { lsp: ManagedLsp; extension: ServerExtension } => !!c.extension);
+
+    if (candidates.length === 0) return null;
+
+    const match = candidates.find((c) => c.lsp.client.running) ?? candidates[0];
+    await match.lsp.client.ensureStarted();
+    return { client: match.lsp.client, extension: match.extension };
   }
 
   toUri(relativePath: string): string {

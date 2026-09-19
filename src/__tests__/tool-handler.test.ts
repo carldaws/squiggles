@@ -15,7 +15,7 @@ function createMockManager() {
     ensureClientForFile: vi.fn().mockResolvedValue(null),
     getClientForFile: vi.fn().mockReturnValue(null),
     getAllClients: vi.fn().mockReturnValue([]),
-    getClientForExtensionTool: vi.fn().mockReturnValue(null),
+    ensureClientForExtensionTool: vi.fn().mockResolvedValue(null),
     toAbsolutePath: vi.fn((p: string) => `/project/${p}`),
     toRelativePath: vi.fn((uri: string) => uri.replace("file:///project/", "")),
     toUri: vi.fn((p: string) => `file:///project/${p}`),
@@ -109,10 +109,9 @@ describe("ToolHandler", () => {
       // Verify 1-indexed → 0-indexed conversion
       expect(mockClient.gotoDefinition).toHaveBeenCalledWith("file:///project/test.ts", 4, 9);
 
-      // Verify 0-indexed → 1-indexed in response
+      // Verify 0-indexed → 1-indexed in response, always as an array
       const parsed = JSON.parse(getResultText(result));
-      expect(parsed.line).toBe(10);
-      expect(parsed.col).toBe(5);
+      expect(parsed).toEqual([{ file: "other.ts", line: 10, col: 5 }]);
     });
 
     it("routes hover to correct handler", async () => {

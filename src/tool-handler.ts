@@ -19,6 +19,9 @@ import { SymbolKind } from "vscode-languageserver-protocol";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { LspManager } from "./lsp-manager.js";
 import { logError } from "./utils.js";
+import type { ExtensionContext } from "./extensions/index.js";
+
+const CODE_ACTION_DIAGNOSTICS_TIMEOUT_MS = 2_000;
 
 interface ToolInput {
   file?: string;
@@ -28,6 +31,10 @@ interface ToolInput {
   endCol?: number;
   newName?: string;
   query?: string;
+  apply?: boolean;
+  tabSize?: number;
+  insertSpaces?: boolean;
+  [key: string]: unknown;
 }
 
 export class ToolHandler {
@@ -73,6 +80,8 @@ export class ToolHandler {
         return this.handleWorkspaceSymbols(input);
       case "code_actions":
         return this.handleCodeActions(input);
+      case "format":
+        return this.handleFormat(input);
       case "rename_prepare":
         return this.handleRenamePrepare(input);
       case "rename":
@@ -112,7 +121,6 @@ export class ToolHandler {
     return { client, uri };
   }
 
-  // Convert 1-indexed to 0-indexed
   private toPosition(line: number, col: number) {
     return { line: line - 1, character: col - 1 };
   }
@@ -126,12 +134,10 @@ export class ToolHandler {
   }
 
   private formatLocationResult(result: Definition | Declaration | Location[] | LocationLink[] | null): unknown {
-    if (!result) return null;
+    if (!result) return [];
     if (Array.isArray(result)) {
-      if (result.length === 0) return [];
-      const formatted = result.map((item) => {
+      return result.map((item) => {
         if ("targetUri" in item) {
-          // LocationLink
           return {
             file: this.manager.toRelativePath(item.targetUri),
             line: item.targetSelectionRange.start.line + 1,
@@ -140,13 +146,9 @@ export class ToolHandler {
         }
         return this.formatLocation(item as Location);
       });
-      return formatted.length === 1 ? formatted[0] : formatted;
     }
-    // Single Location
-    return this.formatLocation(result as Location);
+    return [this.formatLocation(result as Location)];
   }
-
-  // --- Navigation ---
 
   private async handleGoto(type: string, input: ToolInput): Promise<unknown> {
     const { file, line, col } = this.requirePosition(input);
@@ -181,8 +183,6 @@ export class ToolHandler {
     const result = await client.findReferences(uri, pos.line, pos.character);
     return this.formatLocationResult(result);
   }
-
-  // --- Information ---
 
   private async handleHover(input: ToolInput): Promise<unknown> {
     const { file, line, col } = this.requirePosition(input);
@@ -229,8 +229,6 @@ export class ToolHandler {
     };
   }
 
-  // --- Symbols ---
-
   private async handleDocumentSymbols(input: ToolInput): Promise<unknown> {
     const file = this.requireFile(input);
     const { client, uri } = await this.getClientAndUri(file);
@@ -238,12 +236,10 @@ export class ToolHandler {
 
     if (!result || result.length === 0) return [];
 
-    // Check if it's DocumentSymbol[] or SymbolInformation[]
     if ("children" in result[0] || "selectionRange" in result[0]) {
       return (result as DocumentSymbol[]).map((s) => formatDocumentSymbol(s));
     }
 
-    // SymbolInformation[]
     return (result as SymbolInformation[]).map((s) => ({
       name: s.name,
       kind: symbolKindName(s.kind),
@@ -289,8 +285,6 @@ export class ToolHandler {
     return allSymbols;
   }
 
-  // --- Code Actions ---
-
   private async handleCodeActions(input: ToolInput): Promise<unknown> {
     const { file, line, col } = this.requirePosition(input);
     const { client, uri } = await this.getClientAndUri(file);
@@ -302,17 +296,20 @@ export class ToolHandler {
       end: { line: endPos.line, character: endPos.character },
     };
 
-    const result = await client.codeActions(uri, range, []);
+    const diagnostics = await client.waitForDiagnostics(uri, CODE_ACTION_DIAGNOSTICS_TIMEOUT_MS);
+    const overlapping = diagnostics.filter(
+      (d) => d.range.start.line <= range.end.line && d.range.end.line >= range.start.line
+    );
+
+    const result = await client.codeActions(uri, range, overlapping);
 
     if (!result || result.length === 0) return [];
 
     return result.map((action) => {
       if ("command" in action && !("title" in action && "kind" in action)) {
-        // It's a Command
         const cmd = action as Command;
         return { title: cmd.title, command: cmd.command };
       }
-      // It's a CodeAction
       const ca = action as CodeAction;
       return {
         title: ca.title,
@@ -326,7 +323,20 @@ export class ToolHandler {
     });
   }
 
-  // --- Rename ---
+  private async handleFormat(input: ToolInput): Promise<unknown> {
+    const file = this.requireFile(input);
+    const { client, uri } = await this.getClientAndUri(file);
+
+    const edits = await client.formatDocument(uri, {
+      tabSize: input.tabSize ?? 2,
+      insertSpaces: input.insertSpaces ?? true,
+    });
+
+    if (!edits || edits.length === 0) return { changed: false, file };
+
+    const changed = await client.applyEditToDisk({ changes: { [uri]: edits } });
+    return { changed: changed.length > 0, file };
+  }
 
   private async handleRenamePrepare(input: ToolInput): Promise<unknown> {
     const { file, line, col } = this.requirePosition(input);
@@ -351,7 +361,6 @@ export class ToolHandler {
       };
     }
 
-    // Plain Range
     const range = result as Range;
     return {
       canRename: true,
@@ -370,10 +379,17 @@ export class ToolHandler {
     const result = await client.rename(uri, pos.line, pos.character, input.newName);
 
     if (!result) return null;
+
+    if (input.apply) {
+      const changed = await client.applyEditToDisk(result);
+      return {
+        applied: true,
+        files: changed.map((changedUri) => this.manager.toRelativePath(changedUri)),
+      };
+    }
+
     return this.formatWorkspaceEdit(result);
   }
-
-  // --- Call Hierarchy ---
 
   private async handleCallHierarchy(direction: "incoming" | "outgoing", input: ToolInput): Promise<unknown> {
     const { file, line, col } = this.requirePosition(input);
@@ -420,8 +436,6 @@ export class ToolHandler {
     }
   }
 
-  // --- Type Hierarchy ---
-
   private async handleTypeHierarchy(input: ToolInput): Promise<unknown> {
     const { file, line, col } = this.requirePosition(input);
     const { client, uri } = await this.getClientAndUri(file);
@@ -444,15 +458,11 @@ export class ToolHandler {
     };
   }
 
-  // --- Open File ---
-
   private async handleOpenFile(input: ToolInput): Promise<unknown> {
     const file = this.requireFile(input);
     await this.getClientAndUri(file);
     return { file, opened: true };
   }
-
-  // --- Diagnostics ---
 
   private async handleDiagnostics(input: ToolInput): Promise<unknown> {
     if (input.file) {
@@ -461,7 +471,6 @@ export class ToolHandler {
       return diagnostics.map((d) => formatDiagnostic(d, input.file!));
     }
 
-    // Return all diagnostics from all LSPs
     const allDiagnostics: unknown[] = [];
     for (const client of this.manager.getAllClients()) {
       for (const cached of client.getAllCachedDiagnostics()) {
@@ -474,46 +483,40 @@ export class ToolHandler {
     return allDiagnostics;
   }
 
-  // --- Extension Requests ---
-
   private async handleExtensionRequest(toolName: string, input: ToolInput): Promise<unknown> {
-    const match = this.manager.getClientForExtensionTool(toolName);
+    const match = await this.manager.ensureClientForExtensionTool(toolName);
     if (!match) {
       throw new Error(`Unknown tool: ${toolName}`);
     }
 
     const { client, extension } = match;
-    let params: unknown;
+    const ctx: ExtensionContext = {
+      input: input as Record<string, unknown>,
+      resolveUri: (relativePath) => this.manager.toUri(relativePath),
+    };
 
-    switch (extension.params) {
-      case "textDocument": {
-        const file = this.requireFile(input);
-        const absPath = this.manager.toAbsolutePath(file);
-        const uri = await client.ensureOpen(absPath);
-        params = { textDocument: { uri } };
-        break;
-      }
-      case "textDocumentPosition": {
-        const { file, line, col } = this.requirePosition(input);
-        const absPath = this.manager.toAbsolutePath(file);
-        const uri = await client.ensureOpen(absPath);
-        const pos = this.toPosition(line, col);
-        params = {
-          textDocument: { uri },
-          position: { line: pos.line, character: pos.character },
-        };
-        break;
-      }
-      case "custom": {
-        params = input;
-        break;
-      }
+    const needsFile =
+      extension.input === "file" ||
+      extension.input === "position" ||
+      (extension.input === "custom" && typeof input.file === "string");
+
+    if (needsFile) {
+      const file = this.requireFile(input);
+      const absPath = this.manager.toAbsolutePath(file);
+      ctx.uri = await client.ensureOpen(absPath);
+      ctx.path = absPath;
     }
 
-    return client.sendCustomRequest(extension.method, params);
-  }
+    if (extension.input === "position") {
+      const { line, col } = this.requirePosition(input);
+      ctx.position = this.toPosition(line, col);
+    } else if (extension.input === "custom" && typeof input.line === "number" && typeof input.col === "number") {
+      ctx.position = this.toPosition(input.line, input.col);
+    }
 
-  // --- Helpers ---
+    const { method, params } = extension.request(ctx);
+    return client.sendCustomRequest(method, params);
+  }
 
   private formatWorkspaceEdit(edit: WorkspaceEdit): unknown {
     const changes: Record<string, unknown[]> = {};
@@ -549,8 +552,6 @@ export class ToolHandler {
     return { changes };
   }
 }
-
-// --- Formatting utilities ---
 
 function formatMarkupContent(
   content: string | MarkupContent | { language: string; value: string } | Array<string | { language: string; value: string }>

@@ -68,7 +68,17 @@ const EXTENSION_LANGUAGE_MAP: Record<string, string> = {
   ".pm": "perl",
 };
 
+const FILENAME_LANGUAGE_MAP: Record<string, string> = {
+  "go.mod": "go.mod",
+  "go.sum": "go.sum",
+  "go.work": "go.work",
+  Gemfile: "ruby",
+  Rakefile: "ruby",
+};
+
 export function inferLanguageId(filePath: string): string {
+  const byName = FILENAME_LANGUAGE_MAP[path.basename(filePath)];
+  if (byName) return byName;
   const ext = path.extname(filePath);
   return EXTENSION_LANGUAGE_MAP[ext] ?? "plaintext";
 }

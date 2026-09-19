@@ -8,7 +8,7 @@ export interface LspServerConfig {
   env?: Record<string, string>;
 }
 
-export interface MclspConfig {
+export interface SquigglesConfig {
   servers: Record<string, LspServerConfig>;
 }
 

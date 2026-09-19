@@ -2,18 +2,25 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { log } from "./utils.js";
-import type { MclspConfig, LspServerConfig } from "./types.js";
+import type { SquigglesConfig, LspServerConfig } from "./types.js";
 
 const CONFIG_NAMES = [
+  "squiggles.yaml",
+  "squiggles.yml",
+  ".squiggles.yaml",
+  ".squiggles.yml",
+];
+
+const LEGACY_CONFIG_NAMES = [
   "mclsp.yaml",
   "mclsp.yml",
   ".mclsp.yaml",
   ".mclsp.yml",
 ];
 
-export function loadConfig(projectRoot: string): MclspConfig | null {
+export function loadConfig(projectRoot: string): SquigglesConfig | null {
   let configPath: string | null = null;
-  for (const name of CONFIG_NAMES) {
+  for (const name of [...CONFIG_NAMES, ...LEGACY_CONFIG_NAMES]) {
     const candidate = path.join(projectRoot, name);
     if (fs.existsSync(candidate)) {
       configPath = candidate;
@@ -22,8 +29,13 @@ export function loadConfig(projectRoot: string): MclspConfig | null {
   }
 
   if (!configPath) {
-    log(`No mclsp config found in ${projectRoot} (looked for ${CONFIG_NAMES.join(", ")}) — starting with no LSP servers`);
+    log(`No squiggles config found in ${projectRoot} (looked for ${CONFIG_NAMES.join(", ")}) — starting with no LSP servers`);
     return null;
+  }
+
+  const baseName = path.basename(configPath);
+  if (LEGACY_CONFIG_NAMES.includes(baseName)) {
+    log(`Config file "${baseName}" uses the old mclsp name — rename it to squiggles.yaml`);
   }
 
   let raw: unknown;
@@ -37,7 +49,7 @@ export function loadConfig(projectRoot: string): MclspConfig | null {
   return validateConfig(raw);
 }
 
-function validateConfig(raw: unknown): MclspConfig {
+function validateConfig(raw: unknown): SquigglesConfig {
   if (typeof raw !== "object" || raw === null) {
     throw new Error("Config must be a YAML object");
   }

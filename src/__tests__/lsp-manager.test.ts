@@ -1,14 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { LspManager } from "../lsp-manager.js";
-import type { MclspConfig } from "../types.js";
+import type { SquigglesConfig } from "../types.js";
 
-// Mock LspClient to avoid spawning real processes
 vi.mock("../lsp-client.js", () => {
   class MockLspClient {
     name: string;
     running = false;
     capabilities = null;
-    start = vi.fn(async () => { this.running = true; });
+    ensureStarted = vi.fn(async () => { this.running = true; });
     shutdown = vi.fn(async () => {});
     constructor(name: string) {
       this.name = name;
@@ -17,7 +16,7 @@ vi.mock("../lsp-client.js", () => {
   return { LspClient: MockLspClient };
 });
 
-const baseConfig: MclspConfig = {
+const baseConfig: SquigglesConfig = {
   servers: {
     typescript: {
       command: ["typescript-language-server", "--stdio"],
@@ -34,7 +33,6 @@ describe("LspManager", () => {
   describe("constructor", () => {
     it("creates managed LSP entries from config", () => {
       const manager = new LspManager(baseConfig, "/project");
-      // All clients start as not running, so getAllClients returns empty
       expect(manager.getAllClients()).toEqual([]);
     });
   });
@@ -60,7 +58,7 @@ describe("LspManager", () => {
       const client1 = await manager.ensureClientForFile("src/index.ts");
       const client2 = await manager.ensureClientForFile("src/other.ts");
       expect(client1).toBe(client2);
-      expect(client1!.start).toHaveBeenCalledTimes(1);
+      expect(client1!.ensureStarted).toHaveBeenCalledTimes(1);
     });
 
     it("starts different servers for different file types", async () => {
@@ -93,9 +91,38 @@ describe("LspManager", () => {
   describe("getAllConfiguredExtensions", () => {
     it("returns extensions for all configured servers", () => {
       const manager = new LspManager(baseConfig, "/project");
-      const extensions = manager.getAllConfiguredExtensions();
-      expect(extensions.map((e) => e.name)).toContain("ts_go_to_source_definition");
-      expect(extensions.map((e) => e.name)).toContain("ts_organize_imports");
+      const names = manager.getAllConfiguredExtensions().map((e) => e.name);
+      expect(names).toContain("ts_go_to_source_definition");
+      expect(names).toContain("ts_organize_imports");
+      expect(names).toContain("rust_expand_macro");
+    });
+
+    it("deduplicates extensions when servers share a command", () => {
+      const config: SquigglesConfig = {
+        servers: {
+          web: { command: ["typescript-language-server", "--stdio"], filePatterns: ["web/**/*.ts"] },
+          api: { command: ["typescript-language-server", "--stdio"], filePatterns: ["api/**/*.ts"] },
+        },
+      };
+      const manager = new LspManager(config, "/project");
+      const names = manager.getAllConfiguredExtensions().map((e) => e.name);
+      expect(names.filter((n) => n === "ts_organize_imports")).toHaveLength(1);
+    });
+  });
+
+  describe("ensureClientForExtensionTool", () => {
+    it("starts the owning server when it is not yet running", async () => {
+      const manager = new LspManager(baseConfig, "/project");
+      const match = await manager.ensureClientForExtensionTool("rust_expand_macro");
+      expect(match).not.toBeNull();
+      expect(match!.client.name).toBe("rust");
+      expect(match!.client.running).toBe(true);
+      expect(match!.extension.name).toBe("rust_expand_macro");
+    });
+
+    it("returns null for unknown tools", async () => {
+      const manager = new LspManager(baseConfig, "/project");
+      expect(await manager.ensureClientForExtensionTool("nope")).toBeNull();
     });
   });
 

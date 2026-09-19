@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   createProtocolConnection,
   StreamMessageReader,
@@ -17,6 +18,12 @@ import {
   DidCloseTextDocumentNotification,
   DidSaveTextDocumentNotification,
   PublishDiagnosticsNotification,
+  ApplyWorkspaceEditRequest,
+  WorkDoneProgressCreateRequest,
+  ConfigurationRequest,
+  RegistrationRequest,
+  UnregistrationRequest,
+  ShowMessageRequest,
   DefinitionRequest,
   TypeDefinitionRequest,
   ImplementationRequest,
@@ -27,6 +34,8 @@ import {
   DocumentSymbolRequest,
   WorkspaceSymbolRequest,
   CodeActionRequest,
+  DocumentFormattingRequest,
+  DocumentDiagnosticRequest,
   PrepareRenameRequest,
   RenameRequest,
   CallHierarchyPrepareRequest,
@@ -56,11 +65,13 @@ import {
   type Definition,
   type Declaration,
   type PrepareRenameResult,
+  type FormattingOptions,
+  type TextEdit,
 } from "vscode-languageserver-protocol";
 import { log, logError, inferLanguageId, filePathToUri } from "./utils.js";
+import { applyTextEdits } from "./workspace-edits.js";
 import type { LspServerConfig, OpenDocument, CachedDiagnostics } from "./types.js";
 
-const DIAGNOSTICS_FRESHNESS_MS = 500;
 const DIAGNOSTICS_TIMEOUT_MS = 10_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 
@@ -74,6 +85,8 @@ export class LspClient {
   private openDocuments: Map<string, OpenDocument> = new Map();
   private diagnosticsCache: Map<string, CachedDiagnostics> = new Map();
   private diagnosticsWaiters: Map<string, Array<(diags: Diagnostic[]) => void>> = new Map();
+  private pendingDiagnostics: Set<string> = new Set();
+  private startPromise: Promise<void> | null = null;
   private _running = false;
 
   constructor(name: string, config: LspServerConfig, rootPath: string) {
@@ -97,9 +110,24 @@ export class LspClient {
     return this.connection;
   }
 
-  async start(): Promise<void> {
+  async ensureStarted(): Promise<void> {
+    if (this._running) return;
+    if (!this.startPromise) {
+      this.startPromise = this.start().finally(() => {
+        this.startPromise = null;
+      });
+    }
+    return this.startPromise;
+  }
+
+  private async start(): Promise<void> {
     const [cmd, ...args] = this.config.command;
     log(`[${this.name}] Starting LSP: ${this.config.command.join(" ")}`);
+
+    this.openDocuments.clear();
+    this.diagnosticsCache.clear();
+    this.diagnosticsWaiters.clear();
+    this.pendingDiagnostics.clear();
 
     const env = this.config.env
       ? { ...process.env, ...this.config.env }
@@ -118,6 +146,8 @@ export class LspClient {
     this.process.on("exit", (code, signal) => {
       log(`[${this.name}] LSP process exited (code=${code}, signal=${signal})`);
       this._running = false;
+      this.connection?.dispose();
+      this.connection = null;
     });
 
     this.process.on("error", (err) => {
@@ -131,12 +161,12 @@ export class LspClient {
     );
 
     this.connection.onNotification(PublishDiagnosticsNotification.type, (params) => {
-      const cached: CachedDiagnostics = {
+      this.diagnosticsCache.set(params.uri, {
         uri: params.uri,
         diagnostics: params.diagnostics,
         timestamp: Date.now(),
-      };
-      this.diagnosticsCache.set(params.uri, cached);
+      });
+      this.pendingDiagnostics.delete(params.uri);
 
       const waiters = this.diagnosticsWaiters.get(params.uri);
       if (waiters) {
@@ -146,6 +176,28 @@ export class LspClient {
         this.diagnosticsWaiters.delete(params.uri);
       }
     });
+
+    this.connection.onRequest(ApplyWorkspaceEditRequest.type, async (params) => {
+      try {
+        const changed = await this.applyEditToDisk(params.edit);
+        log(`[${this.name}] Applied workspace edit from server (${changed.length} file(s))`);
+        return { applied: true };
+      } catch (err) {
+        logError(`[${this.name}] Failed to apply workspace edit`, err);
+        return {
+          applied: false,
+          failureReason: err instanceof Error ? err.message : String(err),
+        };
+      }
+    });
+
+    this.connection.onRequest(WorkDoneProgressCreateRequest.type, () => null);
+    this.connection.onRequest(ConfigurationRequest.type, (params) =>
+      params.items.map(() => null)
+    );
+    this.connection.onRequest(RegistrationRequest.type, () => null);
+    this.connection.onRequest(UnregistrationRequest.type, () => null);
+    this.connection.onRequest(ShowMessageRequest.type, () => null);
 
     this.connection.listen();
 
@@ -197,6 +249,9 @@ export class LspClient {
           codeAction: {
             dynamicRegistration: false,
           },
+          formatting: {
+            dynamicRegistration: false,
+          },
           rename: {
             dynamicRegistration: false,
             prepareSupport: true,
@@ -207,6 +262,9 @@ export class LspClient {
               valueSet: [1, 2], // Unnecessary, Deprecated
             },
           },
+          diagnostic: {
+            dynamicRegistration: false,
+          },
           callHierarchy: {
             dynamicRegistration: false,
           },
@@ -215,10 +273,21 @@ export class LspClient {
           },
         },
         workspace: {
+          applyEdit: true,
+          workspaceEdit: {
+            documentChanges: true,
+            resourceOperations: ["create", "rename", "delete"],
+          },
+          executeCommand: {
+            dynamicRegistration: false,
+          },
           workspaceFolders: false,
           symbol: {
             dynamicRegistration: false,
           },
+        },
+        window: {
+          workDoneProgress: true,
         },
       },
       workspaceFolders: null,
@@ -248,43 +317,22 @@ export class LspClient {
 
   async ensureOpen(filePath: string): Promise<string> {
     const uri = filePathToUri(filePath);
+    const content = await fs.promises.readFile(filePath, "utf-8");
+    const doc = this.openDocuments.get(uri);
 
-    // Always close + reopen to get fresh disk content
-    if (this.openDocuments.has(uri)) {
-      this.notifyClose(filePath);
+    if (doc) {
+      if (doc.content !== content) {
+        this.sendChange(doc, content);
+      }
+      return uri;
     }
 
-    const content = await fs.promises.readFile(filePath, "utf-8");
-    const languageId = inferLanguageId(filePath);
-    const doc: OpenDocument = { uri, languageId, version: 1, content };
-    this.openDocuments.set(uri, doc);
-
-    this.requireConnection().sendNotification(DidOpenTextDocumentNotification.type, {
-      textDocument: {
-        uri,
-        languageId,
-        version: doc.version,
-        text: content,
-      },
-    });
-
+    this.sendOpen(uri, filePath, content);
     return uri;
   }
 
   async notifyOpen(filePath: string, content: string): Promise<void> {
-    const uri = filePathToUri(filePath);
-    const languageId = inferLanguageId(filePath);
-    const doc: OpenDocument = { uri, languageId, version: 1, content };
-    this.openDocuments.set(uri, doc);
-
-    this.requireConnection().sendNotification(DidOpenTextDocumentNotification.type, {
-      textDocument: {
-        uri,
-        languageId,
-        version: doc.version,
-        text: content,
-      },
-    });
+    this.sendOpen(filePathToUri(filePath), filePath, content);
   }
 
   async notifyChange(filePath: string, content: string): Promise<void> {
@@ -292,18 +340,30 @@ export class LspClient {
     const doc = this.openDocuments.get(uri);
 
     if (!doc) {
-      await this.notifyOpen(filePath, content);
+      this.sendOpen(uri, filePath, content);
       return;
     }
 
+    this.sendChange(doc, content);
+  }
+
+  private sendOpen(uri: string, filePath: string, content: string): void {
+    const languageId = inferLanguageId(filePath);
+    this.openDocuments.set(uri, { uri, languageId, version: 1, content });
+    this.pendingDiagnostics.add(uri);
+
+    this.requireConnection().sendNotification(DidOpenTextDocumentNotification.type, {
+      textDocument: { uri, languageId, version: 1, text: content },
+    });
+  }
+
+  private sendChange(doc: OpenDocument, content: string): void {
     doc.version++;
     doc.content = content;
+    this.pendingDiagnostics.add(doc.uri);
 
     this.requireConnection().sendNotification(DidChangeTextDocumentNotification.type, {
-      textDocument: {
-        uri,
-        version: doc.version,
-      },
+      textDocument: { uri: doc.uri, version: doc.version },
       contentChanges: [{ text: content }],
     });
   }
@@ -329,9 +389,9 @@ export class LspClient {
     });
     this.openDocuments.delete(uri);
     this.diagnosticsCache.delete(uri);
+    this.pendingDiagnostics.delete(uri);
   }
 
-  // --- LSP Requests ---
 
   async gotoDefinition(uri: string, line: number, character: number): Promise<Definition | LocationLink[] | null> {
     return this.requireConnection().sendRequest(DefinitionRequest.type, {
@@ -401,6 +461,13 @@ export class LspClient {
     });
   }
 
+  async formatDocument(uri: string, options: FormattingOptions): Promise<TextEdit[] | null> {
+    return this.requireConnection().sendRequest(DocumentFormattingRequest.type, {
+      textDocument: { uri },
+      options,
+    });
+  }
+
   async prepareRename(uri: string, line: number, character: number): Promise<PrepareRenameResult | null> {
     return this.requireConnection().sendRequest(PrepareRenameRequest.type, {
       textDocument: { uri },
@@ -446,17 +513,78 @@ export class LspClient {
     return this.requireConnection().sendRequest(TypeHierarchySubtypesRequest.type, { item });
   }
 
-  // --- Custom Requests ---
 
   async sendCustomRequest(method: string, params: unknown): Promise<unknown> {
     return this.requireConnection().sendRequest(method, params);
   }
 
-  // --- Diagnostics ---
+
+  async applyEditToDisk(edit: WorkspaceEdit): Promise<string[]> {
+    const changed: string[] = [];
+
+    const applyToFile = async (uri: string, edits: TextEdit[]) => {
+      const filePath = fileURLToPath(uri);
+      const before = await fs.promises.readFile(filePath, "utf-8").catch(() => "");
+      const after = applyTextEdits(before, edits);
+      if (after === before) return;
+      await fs.promises.writeFile(filePath, after);
+      changed.push(uri);
+      if (this.openDocuments.has(uri)) {
+        await this.notifyChange(filePath, after);
+      }
+    };
+
+    if (edit.documentChanges) {
+      for (const change of edit.documentChanges) {
+        if ("kind" in change) {
+          switch (change.kind) {
+            case "create": {
+              const filePath = fileURLToPath(change.uri);
+              if (!fs.existsSync(filePath) || change.options?.overwrite) {
+                await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+                await fs.promises.writeFile(filePath, "");
+                changed.push(change.uri);
+              }
+              break;
+            }
+            case "rename": {
+              await fs.promises.rename(fileURLToPath(change.oldUri), fileURLToPath(change.newUri));
+              changed.push(change.newUri);
+              break;
+            }
+            case "delete": {
+              await fs.promises.rm(fileURLToPath(change.uri), {
+                recursive: change.options?.recursive ?? false,
+              });
+              changed.push(change.uri);
+              break;
+            }
+          }
+        } else {
+          await applyToFile(change.textDocument.uri, change.edits as TextEdit[]);
+        }
+      }
+    } else if (edit.changes) {
+      for (const [uri, edits] of Object.entries(edit.changes)) {
+        await applyToFile(uri, edits);
+      }
+    }
+
+    return changed;
+  }
+
 
   async waitForDiagnostics(uri: string, timeoutMs: number = DIAGNOSTICS_TIMEOUT_MS): Promise<Diagnostic[]> {
+    if (this._capabilities?.diagnosticProvider) {
+      try {
+        return await this.pullDiagnostics(uri);
+      } catch (err) {
+        logError(`[${this.name}] Pull diagnostics failed, falling back to push`, err);
+      }
+    }
+
     const cached = this.diagnosticsCache.get(uri);
-    if (cached && (Date.now() - cached.timestamp) < DIAGNOSTICS_FRESHNESS_MS) {
+    if (cached && !this.pendingDiagnostics.has(uri)) {
       return cached.diagnostics;
     }
 
@@ -484,13 +612,30 @@ export class LspClient {
     });
   }
 
+  private async pullDiagnostics(uri: string): Promise<Diagnostic[]> {
+    const report = await this.requireConnection().sendRequest(DocumentDiagnosticRequest.type, {
+      textDocument: { uri },
+    });
+
+    if (report.kind === "full") {
+      this.diagnosticsCache.set(uri, {
+        uri,
+        diagnostics: report.items,
+        timestamp: Date.now(),
+      });
+      this.pendingDiagnostics.delete(uri);
+      return report.items;
+    }
+
+    return this.diagnosticsCache.get(uri)?.diagnostics ?? [];
+  }
+
   getAllCachedDiagnostics(): CachedDiagnostics[] {
     return Array.from(this.diagnosticsCache.values()).filter(
       (d) => d.diagnostics.length > 0
     );
   }
 
-  // --- Lifecycle ---
 
   async shutdown(): Promise<void> {
     if (!this.connection || !this._running) {
@@ -542,8 +687,11 @@ function summarizeCapabilities(caps: ServerCapabilities): string {
   if (caps.documentSymbolProvider) supported.push("documentSymbol");
   if (caps.workspaceSymbolProvider) supported.push("workspaceSymbol");
   if (caps.codeActionProvider) supported.push("codeAction");
+  if (caps.documentFormattingProvider) supported.push("formatting");
   if (caps.renameProvider) supported.push("rename");
   if (caps.callHierarchyProvider) supported.push("callHierarchy");
   if (caps.typeHierarchyProvider) supported.push("typeHierarchy");
+  if (caps.diagnosticProvider) supported.push("pullDiagnostics");
+  if (caps.executeCommandProvider) supported.push("executeCommand");
   return supported.join(", ");
 }

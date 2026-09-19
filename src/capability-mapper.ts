@@ -6,8 +6,13 @@ export interface McpToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+const FILE_PARAM = {
+  type: "string" as const,
+  description: "Relative file path from project root",
+};
+
 const POSITION_PARAMS = {
-  file: { type: "string" as const, description: "Relative file path from project root" },
+  file: FILE_PARAM,
   line: { type: "number" as const, description: "Line number (1-indexed)" },
   col: { type: "number" as const, description: "Column number (1-indexed)" },
 };
@@ -84,7 +89,7 @@ const STANDARD_TOOLS: McpToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        file: POSITION_PARAMS.file,
+        file: FILE_PARAM,
       },
       required: ["file"],
     },
@@ -102,7 +107,7 @@ const STANDARD_TOOLS: McpToolDefinition[] = [
   },
   {
     name: "code_actions",
-    description: "Get available code actions (quick fixes, refactorings) at the given position. Optionally pass diagnostics to get targeted fixes.",
+    description: "Get available code actions (quick fixes, refactorings) at the given position. Diagnostics overlapping the range are passed to the server so quick fixes are included.",
     inputSchema: {
       type: "object",
       properties: {
@@ -111,6 +116,19 @@ const STANDARD_TOOLS: McpToolDefinition[] = [
         endCol: { type: "number", description: "End column of range (1-indexed, defaults to col)" },
       },
       required: POSITION_REQUIRED,
+    },
+  },
+  {
+    name: "format",
+    description: "Format a file using the language server's formatter and write the result to disk.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file: FILE_PARAM,
+        tabSize: { type: "number", description: "Spaces per indentation level (default 2)" },
+        insertSpaces: { type: "boolean", description: "Indent with spaces instead of tabs (default true)" },
+      },
+      required: ["file"],
     },
   },
   {
@@ -124,12 +142,13 @@ const STANDARD_TOOLS: McpToolDefinition[] = [
   },
   {
     name: "rename",
-    description: "Rename a symbol and get all the file changes needed. Returns a workspace edit with changes across all affected files.",
+    description: "Rename a symbol across all affected files. Returns the workspace edit, or applies it to disk when apply is true.",
     inputSchema: {
       type: "object",
       properties: {
         ...POSITION_PARAMS,
         newName: { type: "string", description: "The new name for the symbol" },
+        apply: { type: "boolean", description: "Write the changes to disk instead of returning the edit (default false)" },
       },
       required: [...POSITION_REQUIRED, "newName"],
     },
@@ -167,10 +186,7 @@ const STANDARD_TOOLS: McpToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        file: {
-          type: "string",
-          description: "Relative file path from project root",
-        },
+        file: FILE_PARAM,
       },
       required: ["file"],
     },
@@ -199,17 +215,22 @@ export function buildExtensionToolDefinitions(extensions: ServerExtension[]): Mc
   return extensions.map((ext) => {
     let inputSchema: Record<string, unknown>;
 
-    switch (ext.params) {
-      case "textDocument":
+    switch (ext.input) {
+      case "none":
         inputSchema = {
           type: "object",
-          properties: {
-            file: { type: "string", description: "Relative file path from project root" },
-          },
+          properties: {},
+          required: [],
+        };
+        break;
+      case "file":
+        inputSchema = {
+          type: "object",
+          properties: { file: FILE_PARAM },
           required: ["file"],
         };
         break;
-      case "textDocumentPosition":
+      case "position":
         inputSchema = {
           type: "object",
           properties: POSITION_PARAMS,
@@ -217,11 +238,10 @@ export function buildExtensionToolDefinitions(extensions: ServerExtension[]): Mc
         };
         break;
       case "custom":
-        inputSchema = {
-          type: "object",
-          properties: {},
-          additionalProperties: true,
-        };
+        if (!ext.inputSchema) {
+          throw new Error(`Extension "${ext.name}" has custom input but no inputSchema`);
+        }
+        inputSchema = ext.inputSchema;
         break;
     }
 

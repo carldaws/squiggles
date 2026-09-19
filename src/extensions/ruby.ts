@@ -3,27 +3,39 @@ import type { ServerExtension } from "./index.js";
 const extensions: ServerExtension[] = [
   {
     name: "ruby_discover_tests",
-    method: "rubyLsp/discoverTests",
     description: "Discover test cases (Minitest, RSpec) in a Ruby file",
-    params: "textDocument",
+    input: "file",
+    request: ({ uri }) => ({
+      method: "rubyLsp/discoverTests",
+      params: { textDocument: { uri } },
+    }),
   },
   {
     name: "ruby_go_to_relevant_file",
-    method: "experimental/goToRelevantFile",
     description: "Navigate between implementation and test file",
-    params: "textDocument",
+    input: "file",
+    request: ({ uri }) => ({
+      method: "experimental/goToRelevantFile",
+      params: { textDocument: { uri } },
+    }),
   },
   {
     name: "ruby_show_syntax_tree",
-    method: "rubyLsp/textDocument/showSyntaxTree",
     description: "Show the Prism AST for a Ruby file",
-    params: "textDocument",
+    input: "file",
+    request: ({ uri }) => ({
+      method: "rubyLsp/textDocument/showSyntaxTree",
+      params: { textDocument: { uri } },
+    }),
   },
   {
     name: "ruby_dependencies",
-    method: "rubyLsp/workspace/dependencies",
     description: "List project gem dependencies",
-    params: "custom",
+    input: "none",
+    request: () => ({
+      method: "rubyLsp/workspace/dependencies",
+      params: null,
+    }),
   },
 ];
 

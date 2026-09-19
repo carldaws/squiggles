@@ -2,7 +2,7 @@
 
 import * as path from "node:path";
 import { createRequire } from "node:module";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   ListToolsRequestSchema,
@@ -23,9 +23,8 @@ async function main(): Promise<void> {
     ? path.resolve(process.argv[2])
     : process.cwd();
 
-  log(`mclsp v${version} starting for project: ${projectRoot}`);
+  log(`squiggles v${version} starting for project: ${projectRoot}`);
 
-  // Load config
   const config = loadConfig(projectRoot);
 
   let manager: LspManager | null = null;
@@ -33,13 +32,10 @@ async function main(): Promise<void> {
   let toolHandler: ToolHandler | null = null;
 
   if (config) {
-    // Create manager (servers start lazily on first tool use)
     manager = new LspManager(config, projectRoot);
 
-    // Register all standard tools unconditionally
     toolDefs = buildToolDefinitions();
 
-    // Register extension tools based on configured commands
     const configuredExtensions = manager.getAllConfiguredExtensions();
     if (configuredExtensions.length > 0) {
       toolDefs.push(...buildExtensionToolDefinitions(configuredExtensions));
@@ -47,17 +43,15 @@ async function main(): Promise<void> {
 
     log(`Registered ${toolDefs.length} tools: ${toolDefs.map((t) => t.name).join(", ")}`);
 
-    // Create tool handler
     toolHandler = new ToolHandler(manager);
   }
 
-  // Create MCP server
-  const mcpServer = new McpServer(
-    { name: "mclsp", version },
+  const server = new Server(
+    { name: "squiggles", version },
     { capabilities: { tools: {} } }
   );
 
-  mcpServer.server.setRequestHandler(ListToolsRequestSchema, async () => {
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
       tools: toolDefs.map((def: McpToolDefinition) => ({
         name: def.name,
@@ -67,10 +61,10 @@ async function main(): Promise<void> {
     };
   });
 
-  mcpServer.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!toolHandler) {
       return {
-        content: [{ type: "text", text: "No mclsp.yaml config found in the project root. Create one to enable LSP tools." }],
+        content: [{ type: "text", text: "No squiggles.yaml config found in the project root. Create one to enable LSP tools." }],
         isError: true,
       };
     }
@@ -78,16 +72,14 @@ async function main(): Promise<void> {
     return toolHandler.handle(name, (args ?? {}) as Record<string, unknown>);
   });
 
-  // Connect transport
   const transport = new StdioServerTransport();
-  await mcpServer.connect(transport);
+  await server.connect(transport);
   log("MCP server connected via stdio");
 
-  // Graceful shutdown
   const shutdown = async () => {
     log("Shutting down...");
     if (manager) await manager.shutdownAll();
-    await mcpServer.close();
+    await server.close();
     process.exit(0);
   };
 
