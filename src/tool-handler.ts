@@ -116,6 +116,7 @@ export class ToolHandler {
   private async getClientAndUri(file: string) {
     const client = await this.manager.ensureClientForFile(file);
     if (!client) throw new Error(`No LSP server configured for file: ${file}`);
+    await client.waitUntilReady();
     const absPath = this.manager.toAbsolutePath(file);
     const uri = await client.ensureOpen(absPath);
     return { client, uri };
@@ -490,6 +491,7 @@ export class ToolHandler {
     }
 
     const { client, extension } = match;
+    await client.waitUntilReady();
     const ctx: ExtensionContext = {
       input: input as Record<string, unknown>,
       resolveUri: (relativePath) => this.manager.toUri(relativePath),

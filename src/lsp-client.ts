@@ -73,6 +73,8 @@ import { applyTextEdits } from "./workspace-edits.js";
 import type { LspServerConfig, OpenDocument, CachedDiagnostics } from "./types.js";
 
 const DIAGNOSTICS_TIMEOUT_MS = 10_000;
+const READINESS_TIMEOUT_MS = 60_000;
+const STARTUP_SETTLE_MS = 200;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
 
 export class LspClient {
@@ -87,6 +89,10 @@ export class LspClient {
   private diagnosticsWaiters: Map<string, Array<(diags: Diagnostic[]) => void>> = new Map();
   private pendingDiagnostics: Set<string> = new Set();
   private startPromise: Promise<void> | null = null;
+  private exitInfo: string | null = null;
+  private lastStderr = "";
+  private quiescent = true;
+  private quiescenceWaiters: Array<() => void> = [];
   private _running = false;
 
   constructor(name: string, config: LspServerConfig, rootPath: string) {
@@ -128,6 +134,8 @@ export class LspClient {
     this.diagnosticsCache.clear();
     this.diagnosticsWaiters.clear();
     this.pendingDiagnostics.clear();
+    this.exitInfo = null;
+    this.lastStderr = "";
 
     const env = this.config.env
       ? { ...process.env, ...this.config.env }
@@ -140,11 +148,14 @@ export class LspClient {
     });
 
     this.process.stderr?.on("data", (data: Buffer) => {
-      log(`[${this.name}] stderr: ${data.toString().trimEnd()}`);
+      const text = data.toString().trimEnd();
+      log(`[${this.name}] stderr: ${text}`);
+      if (text) this.lastStderr = text.slice(-500);
     });
 
     this.process.on("exit", (code, signal) => {
       log(`[${this.name}] LSP process exited (code=${code}, signal=${signal})`);
+      this.exitInfo = `process exited (code=${code}, signal=${signal})${this.lastStderr ? `: ${this.lastStderr}` : ""}`;
       this._running = false;
       this.connection?.dispose();
       this.connection = null;
@@ -152,6 +163,7 @@ export class LspClient {
 
     this.process.on("error", (err) => {
       logError(`[${this.name}] LSP process error`, err);
+      this.exitInfo = err.message;
       this._running = false;
     });
 
@@ -188,6 +200,16 @@ export class LspClient {
           applied: false,
           failureReason: err instanceof Error ? err.message : String(err),
         };
+      }
+    });
+
+    this.connection.onNotification("experimental/serverStatus", (params: unknown) => {
+      const status = params as { quiescent?: boolean };
+      if (typeof status?.quiescent !== "boolean") return;
+      this.quiescent = status.quiescent;
+      if (this.quiescent) {
+        for (const resolve of this.quiescenceWaiters) resolve();
+        this.quiescenceWaiters = [];
       }
     });
 
@@ -272,6 +294,9 @@ export class LspClient {
             dynamicRegistration: false,
           },
         },
+        experimental: {
+          serverStatusNotification: true,
+        },
         workspace: {
           applyEdit: true,
           workspaceEdit: {
@@ -301,13 +326,32 @@ export class LspClient {
       this._capabilities = result.capabilities;
       log(`[${this.name}] Initialized. Capabilities: ${summarizeCapabilities(result.capabilities)}`);
 
+
       await this.connection.sendNotification(InitializedNotification.type, {});
+      await new Promise((resolve) => setTimeout(resolve, STARTUP_SETTLE_MS));
       this._running = true;
     } catch (err) {
       logError(`[${this.name}] Initialize handshake failed`, err);
       this.kill();
-      throw err;
+      throw new Error(this.exitInfo ?? (err instanceof Error ? err.message : String(err)));
     }
+  }
+
+  async waitUntilReady(timeoutMs: number = READINESS_TIMEOUT_MS): Promise<void> {
+    if (this.quiescent) return;
+    log(`[${this.name}] Waiting for server to finish indexing...`);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        const idx = this.quiescenceWaiters.indexOf(waiter);
+        if (idx >= 0) this.quiescenceWaiters.splice(idx, 1);
+        resolve();
+      }, timeoutMs);
+      const waiter = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.quiescenceWaiters.push(waiter);
+    });
   }
 
   hasOpenDocument(filePath: string): boolean {

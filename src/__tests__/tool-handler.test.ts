@@ -68,6 +68,7 @@ describe("ToolHandler", () => {
       const manager = createMockManager();
       (manager.ensureClientForFile as ReturnType<typeof vi.fn>).mockResolvedValue({
         running: true,
+        waitUntilReady: vi.fn().mockResolvedValue(undefined),
         ensureOpen: vi.fn().mockResolvedValue("file:///project/test.ts"),
         rename: vi.fn(),
       });
@@ -90,6 +91,7 @@ describe("ToolHandler", () => {
     it("routes goto_definition to correct handler", async () => {
       const mockClient = {
         running: true,
+        waitUntilReady: vi.fn().mockResolvedValue(undefined),
         ensureOpen: vi.fn().mockResolvedValue("file:///project/test.ts"),
         gotoDefinition: vi.fn().mockResolvedValue({
           uri: "file:///project/other.ts",
@@ -117,6 +119,7 @@ describe("ToolHandler", () => {
     it("routes hover to correct handler", async () => {
       const mockClient = {
         running: true,
+        waitUntilReady: vi.fn().mockResolvedValue(undefined),
         ensureOpen: vi.fn().mockResolvedValue("file:///project/test.ts"),
         hover: vi.fn().mockResolvedValue({
           contents: { kind: "markdown", value: "**string**" },
@@ -146,6 +149,7 @@ describe("ToolHandler", () => {
     it("returns null for hover with no result", async () => {
       const mockClient = {
         running: true,
+        waitUntilReady: vi.fn().mockResolvedValue(undefined),
         ensureOpen: vi.fn().mockResolvedValue("file:///project/test.ts"),
         hover: vi.fn().mockResolvedValue(null),
       };

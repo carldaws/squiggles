@@ -80,7 +80,14 @@ export class LspManager {
     if (candidates.length === 0) return null;
 
     const match = candidates.find((c) => c.lsp.client.running) ?? candidates[0];
-    await match.lsp.client.ensureStarted();
+    try {
+      await match.lsp.client.ensureStarted();
+    } catch (err) {
+      logError(`Failed to start LSP "${match.lsp.client.name}"`, err);
+      throw new Error(
+        `LSP server "${match.lsp.client.name}" failed to start: ${err instanceof Error ? err.message : err}`
+      );
+    }
     return { client: match.lsp.client, extension: match.extension };
   }
 
