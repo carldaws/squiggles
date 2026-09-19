@@ -34,7 +34,7 @@ const extensions: ServerExtension[] = [
     input: "none",
     request: () => ({
       method: "rubyLsp/workspace/dependencies",
-      params: null,
+      params: {},
     }),
   },
 ];
