@@ -38,7 +38,9 @@ export class LspManager {
       return lsp.client;
     } catch (err) {
       logError(`Failed to start LSP "${lsp.client.name}"`, err);
-      return null;
+      throw new Error(
+        `LSP server "${lsp.client.name}" failed to start: ${err instanceof Error ? err.message : err}`
+      );
     }
   }
 
