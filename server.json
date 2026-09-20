@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.carldaws/squiggles",
+  "description": "Let your coding agent see the squiggles — LSP diagnostics, navigation, refactoring, and extras",
+  "repository": {
+    "url": "https://github.com/carldaws/squiggles",
+    "source": "github"
+  },
+  "version": "1.0.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "squiggles",
+      "version": "1.0.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
