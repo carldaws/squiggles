@@ -1,6 +1,7 @@
 {
   "name": "squiggles",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "mcpName": "io.github.carldaws/squiggles",
   "description": "MCP server that lets your coding agent see the squiggles — LSP diagnostics, navigation, refactoring, and server-specific extras",
   "type": "module",
   "main": "dist/index.js",
