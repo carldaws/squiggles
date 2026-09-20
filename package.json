@@ -37,7 +37,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "picomatch": "^4.0.0",
-    "vscode-languageserver-protocol": "^3.17.5",
+    "vscode-languageserver-protocol": "^3.18.3",
     "yaml": "^2.7.0"
   },
   "devDependencies": {

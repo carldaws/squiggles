@@ -545,7 +545,7 @@ export class ToolHandler {
               start: { line: e.range.start.line + 1, col: e.range.start.character + 1 },
               end: { line: e.range.end.line + 1, col: e.range.end.character + 1 },
             },
-            newText: e.newText,
+            newText: "newText" in e ? e.newText : e.snippet.value,
           }));
         }
       }

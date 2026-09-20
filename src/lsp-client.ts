@@ -7,7 +7,7 @@ import {
   StreamMessageReader,
   StreamMessageWriter,
   type ProtocolConnection,
-} from "vscode-languageserver-protocol/lib/node/main.js";
+} from "vscode-languageserver-protocol/node";
 import {
   InitializeRequest,
   InitializedNotification,
@@ -213,12 +213,12 @@ export class LspClient {
       }
     });
 
-    this.connection.onRequest(WorkDoneProgressCreateRequest.type, () => null);
+    this.connection.onRequest(WorkDoneProgressCreateRequest.type, () => {});
     this.connection.onRequest(ConfigurationRequest.type, (params) =>
       params.items.map(() => null)
     );
-    this.connection.onRequest(RegistrationRequest.type, () => null);
-    this.connection.onRequest(UnregistrationRequest.type, () => null);
+    this.connection.onRequest(RegistrationRequest.type, () => {});
+    this.connection.onRequest(UnregistrationRequest.type, () => {});
     this.connection.onRequest(ShowMessageRequest.type, () => null);
 
     this.connection.listen();
