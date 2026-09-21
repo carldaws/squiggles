@@ -9,6 +9,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config.js";
+import { runInit } from "./init.js";
 import { LspManager } from "./lsp-manager.js";
 import { buildToolDefinitions, buildExtensionToolDefinitions } from "./capability-mapper.js";
 import { ToolHandler } from "./tool-handler.js";
@@ -19,6 +20,12 @@ const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "init") {
+    const result = runInit(process.argv.slice(3), process.cwd());
+    process.stdout.write(result.message + "\n");
+    process.exit(result.ok ? 0 : 1);
+  }
+
   const projectRoot = process.argv[2]
     ? path.resolve(process.argv[2])
     : process.cwd();
