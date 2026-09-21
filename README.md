@@ -12,7 +12,15 @@ Beyond the standard protocol, squiggles unlocks the custom superpowers each lang
 claude mcp add squiggles -- npx -y squiggles
 ```
 
-Then create a `squiggles.yaml` in your project root:
+Then, in your project root:
+
+```bash
+npx squiggles init
+```
+
+This writes a `squiggles.yaml` for the languages it finds (a `tsconfig.json` means TypeScript, a `Cargo.toml` means Rust, and so on). Name the servers to choose them yourself: `npx squiggles init typescript ruby`. Presets exist for typescript, rust, ruby, go, python, cpp and lua; each needs its language server on PATH, and `init` prints the install command for every one it writes.
+
+The result for a TypeScript project:
 
 ```yaml
 servers:
