@@ -20,6 +20,12 @@ const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
 
 async function main(): Promise<void> {
+  // Once the host dies, writes to stdout/stderr emit EPIPE as an unhandled
+  // "error" event that would kill the process mid-shutdown, orphaning the
+  // LSP children. Suppressing is standard for stdio servers.
+  process.stdout.on("error", () => {});
+  process.stderr.on("error", () => {});
+
   if (process.argv[2] === "init") {
     const result = runInit(process.argv.slice(3), process.cwd());
     process.stdout.write(result.message + "\n");
@@ -83,15 +89,29 @@ async function main(): Promise<void> {
   await server.connect(transport);
   log("MCP server connected via stdio");
 
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log("Shutting down...");
     if (manager) await manager.shutdownAll();
     await server.close();
     process.exit(0);
   };
+  const requestShutdown = () => {
+    shutdown().catch((err) => {
+      logError("Shutdown failed", err);
+      process.exit(1);
+    });
+  };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", requestShutdown);
+  process.on("SIGTERM", requestShutdown);
+  // The SDK assigns transport.onclose inside connect(), so hook the server
+  // instead — stdin EOF/close is the only signal guaranteed on host death.
+  server.onclose = requestShutdown;
+  process.stdin.on("end", requestShutdown);
+  process.stdin.on("close", requestShutdown);
 }
 
 main().catch((err) => {
