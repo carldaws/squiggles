@@ -86,8 +86,6 @@ async function main(): Promise<void> {
   });
 
   const transport = new StdioServerTransport();
-  await server.connect(transport);
-  log("MCP server connected via stdio");
 
   let shuttingDown = false;
   const shutdown = async () => {
@@ -107,11 +105,16 @@ async function main(): Promise<void> {
 
   process.on("SIGINT", requestShutdown);
   process.on("SIGTERM", requestShutdown);
-  // The SDK assigns transport.onclose inside connect(), so hook the server
-  // instead — stdin EOF/close is the only signal guaranteed on host death.
-  server.onclose = requestShutdown;
+  // Register stdin listeners before connect(): StdioServerTransport starts
+  // consuming stdin during connect(), and EOF/close are one-shot events.
   process.stdin.on("end", requestShutdown);
   process.stdin.on("close", requestShutdown);
+  // The SDK assigns transport.onclose inside connect(), so hook the server
+  // instead of clobbering the transport's internal close handler.
+  server.onclose = requestShutdown;
+
+  await server.connect(transport);
+  log("MCP server connected via stdio");
 }
 
 main().catch((err) => {
