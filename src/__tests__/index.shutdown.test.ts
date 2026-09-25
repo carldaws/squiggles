@@ -4,9 +4,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const DIST_ENTRY = path.resolve(__dirname, "..", "..", "dist", "index.js");
-const FIXTURES = path.join(__dirname, "__shutdown_fixtures__");
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
+const DIST_ENTRY = path.resolve(TEST_DIR, "..", "..", "dist", "index.js");
+const FIXTURES = path.join(TEST_DIR, "__shutdown_fixtures__");
 const DUMMY_LSP = path.join(FIXTURES, "dummy-lsp.mjs");
 
 const TEST_ROOT = path.join(FIXTURES, "project");
@@ -176,26 +178,9 @@ describe("squiggles shutdown on stdin close (issue #2)", () => {
     });
 
     try {
-      // Wait until squiggles is past server.connect() and its stdin
-      // listeners are wired — closes a tiny race where EOF could land
-      // before the listeners are registered.
-      let tick: NodeJS.Timeout | undefined;
-      const connected = await raceWithTimeout<boolean>(
-        (settle) => {
-          tick = setInterval(() => {
-            if (stderrBuf.includes("MCP server connected via stdio")) {
-              settle(true);
-            }
-          }, 20);
-        },
-        5000,
-        () => false,
-      );
-      clearInterval(tick);
-      if (!connected) {
-        throw new Error("child never reached 'MCP server connected'");
-      }
-
+      // Close stdin immediately, without waiting for server.connect().
+      // This covers the race where StdioServerTransport starts consuming
+      // stdin during connect() and EOF arrives before connect() resolves.
       child.stdin!.end();
 
       // Assert the process actually went through the shutdown path: the
