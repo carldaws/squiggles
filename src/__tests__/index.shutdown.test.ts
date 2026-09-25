@@ -18,6 +18,33 @@ function alive(pid: number): boolean {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Runs `setup` with a settle callback; whichever fires first — settle or the
+// timer — wins, and the timer is always cleared so it can't leak past the
+// end of the test.
+function raceWithTimeout<T>(
+  setup: (settle: (value: T) => void) => void,
+  ms: number,
+  onTimeout: () => T,
+): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(onTimeout());
+      }
+    }, ms);
+    const settle = (v: T) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolve(v);
+      }
+    };
+    setup(settle);
+  });
+}
+
 beforeEach(() => {
   fs.mkdirSync(PROJECT_DIR, { recursive: true });
   fs.writeFileSync(
@@ -25,7 +52,7 @@ beforeEach(() => {
     [
       "servers:",
       "  dummy:",
-      `    command: ["node", "${DUMMY_LSP}", "${path.join(PROJECT_DIR, "dummy-lsp.pid")}"]`,
+      `    command: ["${process.execPath}", "${DUMMY_LSP}", "${path.join(PROJECT_DIR, "dummy-lsp.pid")}"]`,
       '    filePatterns: ["*.txt"]',
       "",
     ].join("\n"),
@@ -46,7 +73,7 @@ describe("squiggles shutdown on stdin close (issue #2)", () => {
       );
     }
 
-    const squiggles: ChildProcess = spawn("node", [DIST_ENTRY, PROJECT_DIR], {
+    const squiggles: ChildProcess = spawn(process.execPath, [DIST_ENTRY, PROJECT_DIR], {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -97,18 +124,30 @@ describe("squiggles shutdown on stdin close (issue #2)", () => {
       squiggles.stdin!.end();
 
       // squiggles must exit.
-      const exit = await new Promise<number | null>((resolve) => {
-        squiggles.once("exit", (code) => resolve(code));
-        setTimeout(() => resolve(null), 15000);
-      });
+      const exit = await raceWithTimeout<number | null>(
+        (settle) => squiggles.once("exit", (code) => settle(code)),
+        15000,
+        () => null,
+      );
       expect(exit).not.toBeNull();
       expect(exit).toBe(0);
 
-      // The dummy LSP child must have been reaped too.
-      await sleep(300);
+      // The dummy LSP child must have been reaped too (poll instead of a
+      // fixed sleep so a slow reap doesn't flake and a fast one doesn't wait).
+      const reapDeadline = Date.now() + 3000;
+      while (alive(lspPid) && Date.now() < reapDeadline) {
+        await sleep(50);
+      }
       expect(alive(lspPid)).toBe(false);
     } finally {
       if (squiggles.exitCode === null) squiggles.kill("SIGKILL");
+      // Best-effort: never leave the dummy LSP behind on a failed run.
+      if (fs.existsSync(pidFile)) {
+        const leftover = parseInt(fs.readFileSync(pidFile, "utf-8"), 10);
+        if (Number.isFinite(leftover) && alive(leftover)) {
+          try { process.kill(leftover, "SIGKILL"); } catch { /* already gone */ }
+        }
+      }
     }
   }, 30000);
 
@@ -137,19 +176,22 @@ describe("squiggles shutdown on stdin close (issue #2)", () => {
       // Wait until squiggles is past server.connect() and its stdin
       // listeners are wired — closes a tiny race where EOF could land
       // before the listeners are registered.
-      await new Promise<void>((resolve, reject) => {
-        const deadline = setTimeout(
-          () => reject(new Error("child never reached 'MCP server connected'")),
-          5000,
-        );
-        const tick = setInterval(() => {
-          if (stderrBuf.includes("MCP server connected via stdio")) {
-            clearTimeout(deadline);
-            clearInterval(tick);
-            resolve();
-          }
-        }, 20);
-      });
+      let tick: NodeJS.Timeout | undefined;
+      const connected = await raceWithTimeout<boolean>(
+        (settle) => {
+          tick = setInterval(() => {
+            if (stderrBuf.includes("MCP server connected via stdio")) {
+              settle(true);
+            }
+          }, 20);
+        },
+        5000,
+        () => false,
+      );
+      clearInterval(tick);
+      if (!connected) {
+        throw new Error("child never reached 'MCP server connected'");
+      }
 
       child.stdin!.end();
 
@@ -158,16 +200,17 @@ describe("squiggles shutdown on stdin close (issue #2)", () => {
       // Node's event loop drains once every fd is idle — but it never logs
       // "Shutting down..." because no shutdown handler exists. Only the
       // fixed build takes the explicit path.
-      const result = await new Promise<{ code: number | string | null; loggedShutdown: boolean }>(
-        (resolve) => {
+      const result = await raceWithTimeout(
+        (settle) => {
           child.once("exit", (code, signal) => {
-            resolve({
+            settle({
               code: code ?? signal ?? null,
               loggedShutdown: stderrBuf.includes("Shutting down..."),
             });
           });
-          setTimeout(() => resolve({ code: "timeout", loggedShutdown: false }), 5000);
         },
+        5000,
+        () => ({ code: "timeout" as number | string | null, loggedShutdown: false }),
       );
 
       expect(result.code).not.toBe("timeout");
