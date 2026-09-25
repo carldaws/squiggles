@@ -111,4 +111,71 @@ describe("squiggles shutdown on stdin close (issue #2)", () => {
       if (squiggles.exitCode === null) squiggles.kill("SIGKILL");
     }
   }, 30000);
+
+  it("exits when stdin closes before any MCP traffic", async () => {
+    if (!fs.existsSync(DIST_ENTRY)) {
+      throw new Error(
+        `dist/index.js not found at ${DIST_ENTRY} — run \`npm run build\` before this test`,
+      );
+    }
+
+    // No-LSP project so we don't accidentally spawn a child to clean up.
+    const noLspDir = path.join(FIXTURES, "project-nolsp");
+    fs.mkdirSync(noLspDir, { recursive: true });
+
+    const child = spawn(process.execPath, [DIST_ENTRY, noLspDir], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    // Drain output so the child never blocks on a full pipe.
+    child.stdout?.on("data", () => {});
+    let stderrBuf = "";
+    child.stderr?.on("data", (chunk) => {
+      stderrBuf += chunk.toString();
+    });
+
+    try {
+      // Wait until squiggles is past server.connect() and its stdin
+      // listeners are wired — closes a tiny race where EOF could land
+      // before the listeners are registered.
+      await new Promise<void>((resolve, reject) => {
+        const deadline = setTimeout(
+          () => reject(new Error("child never reached 'MCP server connected'")),
+          5000,
+        );
+        const tick = setInterval(() => {
+          if (stderrBuf.includes("MCP server connected via stdio")) {
+            clearTimeout(deadline);
+            clearInterval(tick);
+            resolve();
+          }
+        }, 20);
+      });
+
+      child.stdin!.end();
+
+      // Assert the process actually went through the shutdown path: the
+      // base build accidentally exits cleanly on a no-LSP project because
+      // Node's event loop drains once every fd is idle — but it never logs
+      // "Shutting down..." because no shutdown handler exists. Only the
+      // fixed build takes the explicit path.
+      const result = await new Promise<{ code: number | string | null; loggedShutdown: boolean }>(
+        (resolve) => {
+          child.once("exit", (code, signal) => {
+            resolve({
+              code: code ?? signal ?? null,
+              loggedShutdown: stderrBuf.includes("Shutting down..."),
+            });
+          });
+          setTimeout(() => resolve({ code: "timeout", loggedShutdown: false }), 5000);
+        },
+      );
+
+      expect(result.code).not.toBe("timeout");
+      expect(result.code).toBe(0);
+      expect(result.loggedShutdown).toBe(true);
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      fs.rmSync(noLspDir, { recursive: true, force: true });
+    }
+  }, 15000);
 });
