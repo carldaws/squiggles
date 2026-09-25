@@ -47,13 +47,16 @@ function raceWithTimeout<T>(
 
 beforeEach(() => {
   fs.mkdirSync(PROJECT_DIR, { recursive: true });
+  // Paths are escaped with JSON.stringify — same convention as renderConfig
+  // in init.ts — so quotes/backslashes in them can't corrupt the YAML.
+  const flow = (items: string[]) => `[${items.map((s) => JSON.stringify(s)).join(", ")}]`;
   fs.writeFileSync(
     path.join(PROJECT_DIR, "squiggles.yaml"),
     [
       "servers:",
       "  dummy:",
-      `    command: ["${process.execPath}", "${DUMMY_LSP}", "${path.join(PROJECT_DIR, "dummy-lsp.pid")}"]`,
-      '    filePatterns: ["*.txt"]',
+      `    command: ${flow([process.execPath, DUMMY_LSP, path.join(PROJECT_DIR, "dummy-lsp.pid")])}`,
+      `    filePatterns: ${flow(["*.txt"])}`,
       "",
     ].join("\n"),
   );
