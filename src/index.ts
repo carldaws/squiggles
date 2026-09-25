@@ -20,11 +20,9 @@ const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
 
 async function main(): Promise<void> {
-  // Once the host dies, writes to stdout/stderr emit EPIPE as an unhandled
-  // "error" event that would kill the process mid-shutdown, orphaning the
-  // LSP children. Suppressing is standard for stdio servers.
-  process.stdout.on("error", () => {});
-  process.stderr.on("error", () => {});
+  const ignoreWriteErrors = () => {};
+  process.stdout.on("error", ignoreWriteErrors);
+  process.stderr.on("error", ignoreWriteErrors);
 
   if (process.argv[2] === "init") {
     const result = runInit(process.argv.slice(3), process.cwd());
@@ -105,12 +103,8 @@ async function main(): Promise<void> {
 
   process.on("SIGINT", requestShutdown);
   process.on("SIGTERM", requestShutdown);
-  // Register stdin listeners before connect(): StdioServerTransport starts
-  // consuming stdin during connect(), and EOF/close are one-shot events.
   process.stdin.on("end", requestShutdown);
   process.stdin.on("close", requestShutdown);
-  // The SDK assigns transport.onclose inside connect(), so hook the server
-  // instead of clobbering the transport's internal close handler.
   server.onclose = requestShutdown;
 
   await server.connect(transport);
