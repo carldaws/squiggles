@@ -1,35 +1,32 @@
-// Dummy LSP for the shutdown integration test.
-// Writes its PID to argv[2] so the test can verify the process was reaped
-// after squiggles exits. Answers initialize only, then hangs on everything
-// (including shutdown) so the ONLY way to exit is squiggles's kill() — the
-// path that used to be skipped when the EPIPE bug killed the parent mid-shutdown.
-import process from "node:process";
 import { writeFileSync } from "node:fs";
 
 writeFileSync(process.argv[2], String(process.pid));
 
-function send(msg) {
-  const json = JSON.stringify(msg);
+function send(message) {
+  const json = JSON.stringify(message);
   process.stdout.write(`Content-Length: ${Buffer.byteLength(json)}\r\n\r\n${json}`);
 }
 
-let buf = Buffer.alloc(0);
+let buffer = Buffer.alloc(0);
+
 process.stdin.on("data", (chunk) => {
-  buf = Buffer.concat([buf, chunk]);
+  buffer = Buffer.concat([buffer, chunk]);
+
   for (;;) {
-    const sep = buf.indexOf("\r\n\r\n");
-    if (sep === -1) break;
-    const header = buf.slice(0, sep).toString();
-    const m = /Content-Length: (\d+)/i.exec(header);
-    if (!m) { buf = buf.slice(sep + 4); continue; }
-    const len = parseInt(m[1], 10);
-    if (buf.length < sep + 4 + len) break;
-    const body = buf.slice(sep + 4, sep + 4 + len).toString();
-    buf = buf.slice(sep + 4 + len);
-    const msg = JSON.parse(body);
-    if (msg.method === "initialize") {
-      send({ jsonrpc: "2.0", id: msg.id, result: { capabilities: { textDocumentSync: 1 } } });
+    const separator = buffer.indexOf("\r\n\r\n");
+    if (separator === -1) return;
+
+    const length = Number(/Content-Length: (\d+)/i.exec(buffer.subarray(0, separator).toString())?.[1]);
+    const bodyStart = separator + 4;
+    if (buffer.length < bodyStart + length) return;
+
+    const message = JSON.parse(buffer.subarray(bodyStart, bodyStart + length).toString());
+    buffer = buffer.subarray(bodyStart + length);
+
+    if (message.method === "initialize") {
+      send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { textDocumentSync: 1 } } });
     }
   }
 });
+
 setInterval(() => {}, 1000);

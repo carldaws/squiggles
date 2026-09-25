@@ -1,212 +1,138 @@
-// Integration test for issue #2: closing the host stdin must shut down
-// squiggles AND the LSP server it spawned (no orphan processes).
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { once } from "node:events";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
+import { setTimeout as sleep } from "node:timers/promises";
 
-const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
-const DIST_ENTRY = path.resolve(TEST_DIR, "..", "..", "dist", "index.js");
-const FIXTURES = path.join(TEST_DIR, "__shutdown_fixtures__");
+const ENTRY = path.resolve(import.meta.dirname, "../../dist/index.js");
+const FIXTURES = path.join(import.meta.dirname, "__shutdown_fixtures__");
 const DUMMY_LSP = path.join(FIXTURES, "dummy-lsp.mjs");
+const PROJECT = path.join(FIXTURES, "project");
+const EMPTY_PROJECT = path.join(FIXTURES, "empty-project");
+const PID_FILE = path.join(PROJECT, "dummy-lsp.pid");
 
-const TEST_ROOT = path.join(FIXTURES, "project");
-const PROJECT_DIR = TEST_ROOT;
+let running: ChildProcessWithoutNullStreams | undefined;
+
+function startSquiggles(projectDir: string) {
+  const child = spawn(process.execPath, [ENTRY, projectDir]);
+  const answered = new Set<number>();
+  let stderr = "";
+
+  running = child;
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  createInterface({ input: child.stdout }).on("line", (line) => {
+    const message = JSON.parse(line);
+    if (typeof message.id === "number") answered.add(message.id);
+  });
+
+  return {
+    child,
+    answered,
+    get stderr() {
+      return stderr;
+    },
+    send(message: object) {
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    },
+  };
+}
+
+async function exitCode(child: ChildProcessWithoutNullStreams, ms: number): Promise<number | null> {
+  const [code] = await once(child, "close", { signal: AbortSignal.timeout(ms) });
+  return code;
+}
+
+async function waitFor(condition: () => boolean, ms: number, what: string): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
+    await sleep(50);
+  }
+}
+
+function lspPid(): number | undefined {
+  try {
+    return Number(fs.readFileSync(PID_FILE, "utf8")) || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function alive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-// Runs `setup` with a settle callback; whichever fires first — settle or the
-// timer — wins, and the timer is always cleared so it can't leak past the
-// end of the test.
-function raceWithTimeout<T>(
-  setup: (settle: (value: T) => void) => void,
-  ms: number,
-  onTimeout: () => T,
-): Promise<T> {
-  return new Promise<T>((resolve) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        resolve(onTimeout());
-      }
-    }, ms);
-    const settle = (v: T) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        resolve(v);
-      }
-    };
-    setup(settle);
-  });
-}
+beforeAll(() => {
+  if (!fs.existsSync(ENTRY)) throw new Error(`${ENTRY} not found, run npm run build first`);
+});
 
 beforeEach(() => {
-  fs.mkdirSync(PROJECT_DIR, { recursive: true });
-  // Paths are escaped with JSON.stringify — same convention as renderConfig
-  // in init.ts — so quotes/backslashes in them can't corrupt the YAML.
-  const flow = (items: string[]) => `[${items.map((s) => JSON.stringify(s)).join(", ")}]`;
+  fs.mkdirSync(PROJECT, { recursive: true });
+  fs.mkdirSync(EMPTY_PROJECT, { recursive: true });
   fs.writeFileSync(
-    path.join(PROJECT_DIR, "squiggles.yaml"),
+    path.join(PROJECT, "squiggles.yaml"),
     [
       "servers:",
       "  dummy:",
-      `    command: ${flow([process.execPath, DUMMY_LSP, path.join(PROJECT_DIR, "dummy-lsp.pid")])}`,
-      `    filePatterns: ${flow(["*.txt"])}`,
+      `    command: ${JSON.stringify([process.execPath, DUMMY_LSP, PID_FILE])}`,
+      `    filePatterns: ["*.txt"]`,
       "",
     ].join("\n"),
   );
-  fs.writeFileSync(path.join(PROJECT_DIR, "sample.txt"), "hello\n");
-  fs.rmSync(path.join(PROJECT_DIR, "dummy-lsp.pid"), { force: true });
+  fs.writeFileSync(path.join(PROJECT, "sample.txt"), "hello\n");
 });
 
 afterEach(() => {
-  fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+  running?.kill("SIGKILL");
+  const pid = lspPid();
+  if (pid && alive(pid)) process.kill(pid, "SIGKILL");
+  fs.rmSync(PROJECT, { recursive: true, force: true });
+  fs.rmSync(EMPTY_PROJECT, { recursive: true, force: true });
 });
 
-describe("squiggles shutdown on stdin close (issue #2)", () => {
-  it("exits and reaps its LSP child when the host closes stdin", async () => {
-    if (!fs.existsSync(DIST_ENTRY)) {
-      throw new Error(
-        `dist/index.js not found at ${DIST_ENTRY} — run \`npm run build\` before this test`,
-      );
-    }
+describe("when stdin closes", () => {
+  it("exits and kills its LSP servers", async () => {
+    const squiggles = startSquiggles(PROJECT);
 
-    const squiggles: ChildProcess = spawn(process.execPath, [DIST_ENTRY, PROJECT_DIR], {
-      stdio: ["pipe", "pipe", "pipe"],
+    squiggles.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } },
     });
-
-    const pidFile = path.join(PROJECT_DIR, "dummy-lsp.pid");
-    const responses = new Map<number, unknown>();
-    let outBuf = "";
-    squiggles.stderr?.on("data", () => {});
-    squiggles.stdout?.on("data", (chunk) => {
-      outBuf += chunk.toString();
-      let i;
-      while ((i = outBuf.indexOf("\n")) !== -1) {
-        const line = outBuf.slice(0, i).trim();
-        outBuf = outBuf.slice(i + 1);
-        if (!line) continue;
-        try {
-          const msg = JSON.parse(line);
-          if (typeof msg.id === "number") responses.set(msg.id, msg);
-        } catch { /* ignore non-JSON noise */ }
-      }
+    await waitFor(() => squiggles.answered.has(1), 5000, "initialize response");
+    squiggles.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    squiggles.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "document_symbols", arguments: { file: "sample.txt" } },
     });
+    await waitFor(() => lspPid() !== undefined, 10_000, "dummy LSP to start");
+    const pid = lspPid()!;
+    expect(alive(pid)).toBe(true);
 
-    const send = (obj: unknown) => squiggles.stdin!.write(JSON.stringify(obj) + "\n");
-    const waitFor = async (cond: () => boolean, ms: number, what: string) => {
-      const start = Date.now();
-      while (Date.now() - start < ms) {
-        if (cond()) return;
-        await sleep(50);
-      }
-      throw new Error(`timeout waiting for ${what}`);
-    };
+    squiggles.child.stdin.end();
 
-    try {
-      // MCP handshake.
-      send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "0" } } });
-      await waitFor(() => responses.has(1), 5000, "initialize response");
-      send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    expect(await exitCode(squiggles.child, 15_000)).toBe(0);
+    await waitFor(() => !alive(pid), 3000, "dummy LSP to exit");
+  }, 30_000);
 
-      // Trigger lazy LSP spawn via a tool call. We don't await a response —
-      // closing stdin will close the transport first.
-      send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "document_symbols", arguments: { file: "sample.txt" } } });
+  it("exits through shutdown before any requests", async () => {
+    const squiggles = startSquiggles(EMPTY_PROJECT);
 
-      await waitFor(() => fs.existsSync(pidFile), 10000, "dummy LSP spawn");
-      const lspPid = parseInt(fs.readFileSync(pidFile, "utf-8"), 10);
-      expect(Number.isFinite(lspPid)).toBe(true);
-      expect(alive(lspPid)).toBe(true);
+    squiggles.child.stdin.end();
 
-      // Host closes its stdin pipe — the SIGKILL/pipe-close signal issue #2.
-      squiggles.stdin!.end();
-
-      // squiggles must exit.
-      const exit = await raceWithTimeout<number | null>(
-        (settle) => squiggles.once("exit", (code) => settle(code)),
-        15000,
-        () => null,
-      );
-      expect(exit).not.toBeNull();
-      expect(exit).toBe(0);
-
-      // The dummy LSP child must have been reaped too (poll instead of a
-      // fixed sleep so a slow reap doesn't flake and a fast one doesn't wait).
-      const reapDeadline = Date.now() + 3000;
-      while (alive(lspPid) && Date.now() < reapDeadline) {
-        await sleep(50);
-      }
-      expect(alive(lspPid)).toBe(false);
-    } finally {
-      if (squiggles.exitCode === null) squiggles.kill("SIGKILL");
-      // Best-effort: never leave the dummy LSP behind on a failed run.
-      if (fs.existsSync(pidFile)) {
-        const leftover = parseInt(fs.readFileSync(pidFile, "utf-8"), 10);
-        if (Number.isFinite(leftover) && alive(leftover)) {
-          try { process.kill(leftover, "SIGKILL"); } catch { /* already gone */ }
-        }
-      }
-    }
-  }, 30000);
-
-  it("exits when stdin closes before any MCP traffic", async () => {
-    if (!fs.existsSync(DIST_ENTRY)) {
-      throw new Error(
-        `dist/index.js not found at ${DIST_ENTRY} — run \`npm run build\` before this test`,
-      );
-    }
-
-    // No-LSP project so we don't accidentally spawn a child to clean up.
-    const noLspDir = path.join(FIXTURES, "project-nolsp");
-    fs.mkdirSync(noLspDir, { recursive: true });
-
-    const child = spawn(process.execPath, [DIST_ENTRY, noLspDir], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    // Drain output so the child never blocks on a full pipe.
-    child.stdout?.on("data", () => {});
-    let stderrBuf = "";
-    child.stderr?.on("data", (chunk) => {
-      stderrBuf += chunk.toString();
-    });
-
-    try {
-      // Close stdin immediately, without waiting for server.connect().
-      // This covers the race where StdioServerTransport starts consuming
-      // stdin during connect() and EOF arrives before connect() resolves.
-      child.stdin!.end();
-
-      // Assert the process actually went through the shutdown path: the
-      // base build accidentally exits cleanly on a no-LSP project because
-      // Node's event loop drains once every fd is idle — but it never logs
-      // "Shutting down..." because no shutdown handler exists. Only the
-      // fixed build takes the explicit path.
-      const result = await raceWithTimeout(
-        (settle) => {
-          child.once("exit", (code, signal) => {
-            settle({
-              code: code ?? signal ?? null,
-              loggedShutdown: stderrBuf.includes("Shutting down..."),
-            });
-          });
-        },
-        5000,
-        () => ({ code: "timeout" as number | string | null, loggedShutdown: false }),
-      );
-
-      expect(result.code).not.toBe("timeout");
-      expect(result.code).toBe(0);
-      expect(result.loggedShutdown).toBe(true);
-    } finally {
-      if (child.exitCode === null) child.kill("SIGKILL");
-      fs.rmSync(noLspDir, { recursive: true, force: true });
-    }
-  }, 15000);
+    expect(await exitCode(squiggles.child, 5000)).toBe(0);
+    expect(squiggles.stderr).toContain("Shutting down...");
+  }, 15_000);
 });
